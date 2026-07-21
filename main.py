@@ -1,20 +1,23 @@
 import os
 import json
 import pymysql
+import chromadb
 from typing import List
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 
-# Google GenAI SDK အသစ်
-from google import genai
-from google.genai import types
+# Groq Official Client Library
+from groq import Groq
 
-# Modern LangChain Utilities
+# Local Offline Embedding Library (အင်တာနက် API ခေါ်စရာ မလိုတော့ပါ)
+from sentence_transformers import SentenceTransformer
+
+# Loaders & Text Splitters
 from docx2txt import process as docx_process
+from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
 
-app = FastAPI(title="NSPU Guide Chatbot Backend (Modern MySQL)")
+app = FastAPI(title="NSPU Guide Chatbot Backend (Groq + Local Embeddings)")
 
 # --- CONFIGURATION ---
 DB_CONFIG = {
@@ -25,15 +28,19 @@ DB_CONFIG = {
     "cursorclass": pymysql.cursors.DictCursor
 }
 
-# API Key initialization for modern SDK
-GEMINI_API_KEY = "AQ.Ab8RN6LD8_Rf1aCGNoArVB5G_wC0IVumzGjlCopc8V-StQfmRQ"  # <--- သင်၏ Gemini API Key ထည့်ပါ
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+# ⚠️ Groq API Key ကို ဒီနေရာတွင် ထည့်ပါ
+GROQ_API_KEY = ""  # <--- သင်၏ Groq Key ထည့်ရန်
+groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Connection Function
+# Local Embedding Model (စက်ထဲတွင် အော့ဖ်လိုင်း ဆွဲယူမည်ဖြစ်သဖြင့် Network Error လုံးဝ မတက်တော့ပါ)
+print("💡 Loading Local Embedding Model...")
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# MySQL Connection Function
 def get_db_connection():
     return pymysql.connect(**DB_CONFIG)
 
-# WebSocket Manager (Real-time Dashboard သို့ Data တွန်းပို့ရန်)
+# WebSocket Manager
 class DashboardConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -55,82 +62,84 @@ class CommentInput(BaseModel):
     user_role: str
     comment_text: str
 
-# --- TASK 4: Gemini API (Modern SDK) သုံးပြီး ABSA လုပ်ခြင်း ---
+# --- Local Embedding Function ---
+def get_text_embedding(text: str):
+    # စက်ထဲတွင် အော့ဖ်လိုင်း Vector ထုတ်ပေးသည်
+    embedding = embed_model.encode(text)
+    return embedding.tolist()
+
+# --- TASK 4: ABSA Analysis via Groq ---
 def analyze_comment_absa(text: str):
     prompt = f"""
-    You are an expert school feedback analyst. Analyze this comment: "{text}"
-    Extract the "aspect" (Choose one: Canteen, Teaching, Facility, Environment, Administrative)
-    and the "sentiment" (Choose one: Positive, Negative, Neutral).
+    Analyze the school feedback comment. Extract the specific "aspect" (Choose one: Canteen, Teaching, Facility, Environment, Administrative) 
+    and "sentiment" (Choose one: Positive, Negative, Neutral).
+    Comment: "{text}"
+    Respond STRICTLY in JSON format with keys "aspect" and "sentiment". Do not include markdown or backticks.
+    Example: {{"aspect": "Canteen", "sentiment": "Negative"}}
     """
+
     try:
-        # Structured Output ရဖို့အတွက် Response Schema သတ်မှတ်ခြင်း
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "aspect": types.Schema(type=types.Type.STRING),
-                        "sentiment": types.Schema(type=types.Type.STRING),
-                    },
-                    required=["aspect", "sentiment"],
-                ),
-            ),
+        response = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            response_format={"type": "json_object"}
         )
-        return json.loads(response.text.strip())
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
-        print(f"ABSA Error: {e}")
+        print(f"Groq ABSA Error: {e}")
         return {"aspect": "General", "sentiment": "Neutral"}
 
-# --- TASK 2: RAG System (Manual Extraction & Vector Embeddings) ---
-def get_gemini_embedding(texts: List[str]):
-    """Gemini Text Embedding API အသစ်ကို လှမ်းခေါ်ခြင်း"""
-    try:
-        response = ai_client.models.embed_content(
-            model="text-embedding-004",
-            contents=texts
-        )
-        # Vector values များကို ထုတ်ယူခြင်း
-        return [embedding.values for embedding in response.embeddings]
-    except Exception as e:
-        print(f"Embedding Error: {e}")
-        return []
-
-class CustomGeminiEmbeddings:
-    """Chroma Vector Store နှင့် တွဲဖက်သုံးနိုင်ရန် Custom Class ဆောက်ခြင်း"""
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        return get_gemini_embedding(texts)
-    def embed_query(self, text: str) -> List[float]:
-        res = get_gemini_embedding([text])
-        return res[0] if res else []
-
+# --- TASK 2: RAG System (Vector DB) ---
 def init_vector_db():
+    extracted_text = ""
+    
     word_file = "nspu_guide_info.docx"
     if os.path.exists(word_file):
-        print("💡 Processing Word File into Vector DB...")
-        # docx2txt သုံးပြီး စာသားများတိုက်ရိုက်ထုတ်ယူခြင်း
-        text = docx_process(word_file)
+        print("💡 Processing Word File...")
+        extracted_text += docx_process(word_file) + "\n\n"
         
-        # စာသားဖြတ်ခြင်း
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=120)
-        chunks = text_splitter.split_text(text)
-        
-        # Vector Database ထဲသို့ သိမ်းဆည်းခြင်း
-        Chroma.from_texts(
-            texts=chunks, 
-            embedding=CustomGeminiEmbeddings(), 
-            persist_directory="./nspu_vector_db"
-        )
-        print("✅ Vector DB Created Successfully.")
-    else:
-        print("⚠️ Warning: nspu_guide_info.docx not found. Please add the file.")
+    pdf_file = "nspu_guide_info.pdf"
+    if os.path.exists(pdf_file):
+        print("💡 Processing PDF File...")
+        reader = PdfReader(pdf_file)
+        for page in reader.pages:
+            t = page.extract_text()
+            if t:
+                extracted_text += t + "\n"
 
-# Server စတင်ချိန်တွင် Vector DB တည်ဆောက်မည်
+    if extracted_text.strip():
+        print("💡 Creating Vector Database with Local Embeddings...")
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+        chunks = text_splitter.split_text(extracted_text)
+        
+        chroma_client = chromadb.PersistentClient(path="./nspu_vector_db")
+        
+        try:
+            chroma_client.delete_collection(name="nspu_docs")
+        except:
+            pass
+            
+        collection = chroma_client.create_collection(name="nspu_docs")
+        
+        embeddings = []
+        for chunk in chunks:
+            emb = get_text_embedding(chunk)
+            embeddings.append(emb)
+
+        ids = [f"doc_{i}" for i in range(len(chunks))]
+        
+        collection.add(
+            documents=chunks,
+            embeddings=embeddings,
+            ids=ids
+        )
+        print("✅ Vector DB Created Successfully!")
+    else:
+        print("⚠️ Warning: Neither nspu_guide_info.docx nor nspu_guide_info.pdf was found.")
+
 init_vector_db()
 
-# --- TASK 1: API ENDPOINTS ---
+# --- API ENDPOINTS ---
 
 @app.post("/api/comments")
 async def create_comment(data: CommentInput):
@@ -174,28 +183,35 @@ async def ask_chatbot(question: str = Query(..., description="ကျောင်
     if not os.path.exists("./nspu_vector_db"):
         raise HTTPException(status_code=400, detail="Knowledge base is not initialized.")
     try:
-        # Chroma ထဲမှ သက်ဆိုင်ရာ စာသားများကို ရှာဖွေခြင်း (Similarity Search)
-        db = Chroma(persist_directory="./nspu_vector_db", embedding_function=CustomGeminiEmbeddings())
-        docs = db.similarity_search(question, k=3)
-        context = "\n\n".join([doc.page_content for doc in docs])
+        chroma_client = chromadb.PersistentClient(path="./nspu_vector_db")
+        collection = chroma_client.get_collection(name="nspu_docs")
         
-        # Gemini သို့ Context နှင့် မေးခွန်းတွဲပို့ပြီး ဖြေခိုင်းခြင်း (RAG Concept)
-        prompt = f"""
-        You are a helpful assistant for NSPU (National Sport University Guide).
-        Answer the student's question based strictly on the following context. Respond in Myanmar language.
-        If the answer cannot be found in the context, say honestly that you don't know based on current data.
+        query_embedding = get_text_embedding(question)
         
-        Context:
-        {context}
-        
-        Question: {question}
-        """
-        
-        response = ai_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=3
         )
-        return {"answer": response.text}
+        
+        context_list = results["documents"][0] if results["documents"] else []
+        context = "\n\n".join(context_list)
+        
+        system_prompt = """You are a helpful assistant for NSPU (National Sport University Guide).
+Answer the user's question based strictly on the provided context. Respond in Myanmar language.
+If the answer cannot be found in the context, say honestly that you don't know based on current data."""
+
+        user_content = f"Context:\n{context}\n\nQuestion: {question}"
+
+        response = groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            model="llama-3.1-8b-instant"
+        )
+        
+        return {"answer": response.choices[0].message.content}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
