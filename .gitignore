@@ -5,3 +5,11 @@ node_modules/
 .next/
 .env
 .env.local
+
+.env
+nspu_vector_db/
+__pycache__/
+*.pyc
+backend/venv/
+node_modules/
+dist/

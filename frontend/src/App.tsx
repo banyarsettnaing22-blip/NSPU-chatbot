@@ -9,6 +9,17 @@ interface Message {
   comment?: string;
 }
 
+// 🇲🇲 မြန်မာ Unicode စာလုံးအစီအစဉ် မှားယွင်းမှုများကို အလိုအလျောက် ပြန်လည်ပြုပြင်ပေးသည့် Function
+const fixMyanmarUnicode = (text: string): string => {
+  if (!text) return '';
+  return text
+    .normalize('NFC')
+    // သရတွဲ နှင့် အောက်ကမြစ် အစီအစဉ်များ ပြန်လည်ပြင်ဆင်ခြင်း
+    .replace(/\u1037\u1031/g, '\u1031\u1037')
+    .replace(/\u1031\u1031/g, '\u1031')
+    .replace(/\u1036\u1037/g, '\u1037\u1036');
+};
+
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([
     { 
@@ -59,7 +70,7 @@ export default function App() {
   };
 
   // 3. Send Message and Log User Question to Backend/Database
-  const handleSend = () => {
+  const handleSend = async () => {
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
 
@@ -95,19 +106,36 @@ export default function App() {
     // Console ထဲတွင် Payload ကို စစ်ဆေးရန် Log ထုတ်ပြခြင်း
     console.log("💾 Logging User Question to Database Payload:", logPayload);
 
-    // Simulated FastAPI Backend Response
-    setTimeout(() => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/ask?question=${encodeURIComponent(trimmedInput)}`);
+      if (!response.ok) {
+        throw new Error(`Server returned status ${response.status}`);
+      }
+      const data = await response.json();
+
+      // 💡 fixMyanmarUnicode Function ဖြင့် စာလုံးစစ်ဆေးပြင်ဆင်ပြီးမှ Bot Message ကို ထည့်သွင်းပေးပါသည်
+      const rawText = data.answer || data.response || "အချက်အလက် ရှာမတွေ့ပါခင်ဗျာ။";
       const botResponse: Message = {
         id: (Date.now() + 1).toString(),
-        text: `"${trimmedInput}" အတွက် တိကျသော အချက်အလက်များကို RAG Engine မှ ရှာဖွေပေးနေပါသည်။`,
+        text: fixMyanmarUnicode(rawText),
         sender: 'bot',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         feedback: null
       };
 
       setMessages(prev => [...prev, botResponse]);
+    } catch (error) {
+      console.error("Backend Connection Error:", error);
+      const errorResponse: Message = {
+        id: (Date.now() + 1).toString(),
+        text: "❌ Backend Server (http://localhost:8000) ထံ ချိတ်ဆက်၍ မရပါ သို့မဟုတ် Error ဖြစ်ပေါ်နေပါသည်။",
+        sender: 'bot',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+      setMessages(prev => [...prev, errorResponse]);
+    } finally {
       setIsLoading(false);
-    }, 1000);
+    }
   };
 
   // Feedback (Like / Dislike)
@@ -137,7 +165,8 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden">
+    // 🎨 font-['Padauk',sans-serif] ဖြင့် မြန်မာစာလုံးဒီဇိုင်း တိကျသပ်ရပ်အောင် ပြင်ဆင်ထားပါသည်
+    <div className="flex h-screen bg-slate-50 text-slate-800 font-['Padauk',sans-serif] overflow-hidden">
       
       <main className="flex-1 flex flex-col h-full max-w-5xl mx-auto w-full bg-white shadow-sm border-x border-slate-200">
         
