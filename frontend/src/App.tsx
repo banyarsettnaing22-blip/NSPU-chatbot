@@ -59,7 +59,7 @@ export default function App() {
   };
 
   // 3. Send Message and Log User Question to Backend/Database
-  const handleSend = () => {
+  const handleSend = async () => {
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
 
@@ -85,29 +85,33 @@ export default function App() {
     setInput('');
     setIsLoading(true);
 
-    // 🎯 BACKEND DATABASE သို့ သွားရောက်သိမ်းဆည်းမည့် Payload
-    const logPayload = {
-      user_id: sessionId,          // ဘယ် User လဲ (Anonymous ID)
-      question: trimmedInput,      // ဘာမေးခွန်း မေးတာလဲ
-      created_at: new Date().toISOString() // ဘယ်အချိန်မှာ မေးတာလဲ
-    };
+    // 🎯 FastAPI Backend API သို့ တကယ် လှမ်းခေါ်ခြင်း
+    try {
+      const response = await fetch(`http://localhost:8000/api/ask?question=${encodeURIComponent(trimmedInput)}`);
+      const data = await response.json();
 
-    // Console ထဲတွင် Payload ကို စစ်ဆေးရန် Log ထုတ်ပြခြင်း
-    console.log("💾 Logging User Question to Database Payload:", logPayload);
-
-    // Simulated FastAPI Backend Response
-    setTimeout(() => {
       const botResponse: Message = {
         id: (Date.now() + 1).toString(),
-        text: `"${trimmedInput}" အတွက် တိကျသော အချက်အလက်များကို RAG Engine မှ ရှာဖွေပေးနေပါသည်။`,
+        text: data.answer || "အချက်အလက် ရှာမတွေ့ပါ။",
         sender: 'bot',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         feedback: null
       };
 
       setMessages(prev => [...prev, botResponse]);
+    } catch (error) {
+      console.error("Backend API Error:", error);
+      const errorResponse: Message = {
+        id: (Date.now() + 1).toString(),
+        text: "Backend Server သို့ လှမ်းခေါ်၍ မရပါ။ Server run ထားခြင်း ရှိမရှိ စစ်ဆေးပါ။",
+        sender: 'bot',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        feedback: null
+      };
+      setMessages(prev => [...prev, errorResponse]);
+    } finally {
       setIsLoading(false);
-    }, 1000);
+    }
   };
 
   // Feedback (Like / Dislike)
@@ -120,20 +124,44 @@ export default function App() {
     }));
   };
 
-  // Submit Comment / Report Correct Data
-  const handleSubmitComment = (msgId: string) => {
+  // Submit Comment / Report Correct Data (Backend Database သို့ ပို့မည်)
+  const handleSubmitComment = async (msgId: string) => {
     if (!commentText.trim()) return;
-    
+
+    const currentComment = commentText;
+
+    // UI မွာ တန္းျပမည္
     setMessages(prev => prev.map(msg => {
       if (msg.id === msgId) {
-        return { ...msg, comment: commentText };
+        return { ...msg, comment: currentComment };
       }
       return msg;
     }));
 
-    console.log(`💬 User (${sessionId}) Feedback on Msg ${msgId}:`, commentText);
     setCommentText('');
     setActiveFeedbackMsgId(null);
+
+    // 🎯 BACKEND DATABASE (`/api/comments`) သို့ တကယ် လှမ်းပို့ခြင်း
+    try {
+      const response = await fetch('http://localhost:8000/api/comments', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          user_role: 'Student',
+          comment_text: currentComment
+        }),
+      });
+
+      if (response.ok) {
+        console.log("✅ Comment saved to Database & ABSA analyzed successfully!");
+      } else {
+        console.error("❌ Failed to save comment to Database");
+      }
+    } catch (error) {
+      console.error("Error sending comment to Backend:", error);
+    }
   };
 
   return (
