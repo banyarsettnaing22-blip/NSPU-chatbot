@@ -2,39 +2,36 @@ import os
 import json
 import pymysql
 import chromadb
+import docx
 from typing import List
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
+from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 
-# Groq Official Client Library
-from groq import Groq
+# OpenAI Client Library
+from openai import OpenAI
 
-# Local Offline Embedding Library (အင်တာနက် API ခေါ်စရာ မလိုတော့ပါ)
+# Local Offline Embedding Library (Multi-lingual model သုံးထားသည်)
 from sentence_transformers import SentenceTransformer
 
 # Loaders & Text Splitters
 from docx2txt import process as docx_process
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from fastapi.middleware.cors import CORSMiddleware # <--- ဒီ import လိုင်း ပါရပါမည်
-
-
-# api key section 
-from dotenv import load_dotenv
 
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")    
-
-groq_client = Groq(api_key=GROQ_API_KEY)
+# --- OPENAI SETUP (Teacher Frame) ---
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 #-----------------------------------------------------------------------
 
-app = FastAPI(title="NSPU Guide Chatbot Backend (Groq + Local Embeddings)")
+app = FastAPI(title="NSPU Guide Chatbot Backend (OpenAI + Local Embeddings)")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Frontend နေရာပေါင်းစုံကနေ လာသော Request များကို ခွင့်ပြုမည်
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,20 +41,21 @@ app.add_middleware(
 DB_CONFIG = {
     "host": "localhost",
     "user": "root",
-    "password": "root",  # <--- သင်၏ MySQL Password ထည့်ပါ
+    "password": "root",
     "database": "nspu_db",
     "cursorclass": pymysql.cursors.DictCursor
 }
 
-# Local Embedding Model (စက်ထဲတွင် အော့ဖ်လိုင်း ဆွဲယူမည်ဖြစ်သဖြင့် Network Error လုံးဝ မတက်တော့ပါ)
-print("💡 Loading Local Embedding Model...")
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+# Multi-lingual Embedding Model (မြန်မာစာ အဓိပ္ပာယ်ကို သေချာနားလည်သည့် Model)
+print("💡 Loading Multi-lingual Embedding Model...")
+embed_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 
-# MySQL Connection Function
+# ChromaDB Client နဲ့ Collection ကို Global ထားခြင်း (ဒါဆိုရင် ခဏခဏ အသစ်ပြန်မဆွဲတော့ပါ)
+chroma_client = chromadb.PersistentClient(path="./nspu_vector_db")
+
 def get_db_connection():
     return pymysql.connect(**DB_CONFIG)
 
-# WebSocket Manager
 class DashboardConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -79,13 +77,11 @@ class CommentInput(BaseModel):
     user_role: str
     comment_text: str
 
-# --- Local Embedding Function ---
 def get_text_embedding(text: str):
-    # စက်ထဲတွင် အော့ဖ်လိုင်း Vector ထုတ်ပေးသည်
     embedding = embed_model.encode(text)
     return embedding.tolist()
 
-# --- TASK 4: ABSA Analysis via Groq ---
+# --- TASK 4: ABSA Analysis via OpenAI ---
 def analyze_comment_absa(text: str):
     prompt = f"""
     Analyze the school feedback comment. Extract the specific "aspect" (Choose one: Canteen, Teaching, Facility, Environment, Administrative) 
@@ -96,28 +92,40 @@ def analyze_comment_absa(text: str):
     """
 
     try:
-        response = groq_client.chat.completions.create(
+        # OpenAI Chat Completions API Call
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # သို့မဟုတ် teacher ပေးထားသော model name
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",
             response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
-        print(f"Groq ABSA Error: {e}")
+        print(f"OpenAI ABSA Error: {e}")
         return {"aspect": "General", "sentiment": "Neutral"}
+    
+def read_docx_file(file_path):
+    doc = docx.Document(file_path)
+    full_text = []
+    # စာပိုဒ်များကို ဖတ်ခြင်း
+    for para in doc.paragraphs:
+        if para.text.strip():
+            full_text.append(para.text)
+    # ဇယား (Tables) ထဲက စာများကိုပါ သေချာဖတ်ခြင်း
+    for table in doc.tables:
+        for row in table.rows:
+            row_data = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+            if row_data:
+                full_text.append(" | ".join(row_data))
+    return "\n".join(full_text)
 
 # --- TASK 2: RAG System (Vector DB) ---
 def init_vector_db():
-    if os.path.exists("./nspu_vector_db"):
-        print("💡 Vector DB already exists. Skipping creation.")
-        return
-    
     extracted_text = ""
     
-    word_file = "project_data.docx"
+    word_file = "project data (2).docx"
     if os.path.exists(word_file):
-        print("💡 Processing Word File...")
-        extracted_text += docx_process(word_file) + "\n\n"
+        print("💡 Processing Word File with python-docx...")
+        extracted_text += read_docx_file(word_file) + "\n\n"
         
     pdf_file = "nspu_guide_info.pdf"
     if os.path.exists(pdf_file):
@@ -129,24 +137,22 @@ def init_vector_db():
                 extracted_text += t + "\n"
 
     if extracted_text.strip():
-        print("💡 Creating Vector Database with Local Embeddings...")
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+        print("💡 Re-indexing Vector Database...")
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=600, 
+            chunk_overlap=100,
+            separators=["\n\n", "\n", " ", ""]
+        )
         chunks = text_splitter.split_text(extracted_text)
         
-        chroma_client = chromadb.PersistentClient(path="./nspu_vector_db")
-        
+        # Global chroma_client ကိုပဲ သုံးမည်
         try:
             chroma_client.delete_collection(name="nspu_docs")
-        except:
+        except Exception:
             pass
             
         collection = chroma_client.create_collection(name="nspu_docs")
-        
-        embeddings = []
-        for chunk in chunks:
-            emb = get_text_embedding(chunk)
-            embeddings.append(emb)
-
+        embeddings = [get_text_embedding(chunk) for chunk in chunks]
         ids = [f"doc_{i}" for i in range(len(chunks))]
         
         collection.add(
@@ -155,8 +161,6 @@ def init_vector_db():
             ids=ids
         )
         print("✅ Vector DB Created Successfully!")
-    else:
-        print("⚠️ Warning: Neither nspu_guide_info.docx nor nspu_guide_info.pdf was found.")
 
 init_vector_db()
 
@@ -204,31 +208,33 @@ async def ask_chatbot(question: str = Query(..., description="ကျောင်
     if not os.path.exists("./nspu_vector_db"):
         raise HTTPException(status_code=400, detail="Knowledge base is not initialized.")
     try:
-        chroma_client = chromadb.PersistentClient(path="./nspu_vector_db")
+        # Global အဖြစ် ထားထားသော Collection ကို တိုက်ရိုက်ယူသုံးခြင်း (ခဏခဏ Re-open မလုပ်တော့ပါ)
         collection = chroma_client.get_collection(name="nspu_docs")
         
         query_embedding = get_text_embedding(question)
         
         results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=3
+            n_results=10
         )
         
         context_list = results["documents"][0] if results["documents"] else []
         context = "\n\n".join(context_list)
         
-        system_prompt = """You are a helpful assistant for NSPU (National Sport University Guide).
-Answer the user's question based strictly on the provided context. Respond in Myanmar language.
-If the answer cannot be found in the context, say honestly that you don't know based on current data."""
+        system_prompt = """You are an official information assistant for NSPU Guide.
+                Answer the user's question based on the provided context in Myanmar language.
+                If the exact wording is slightly different, try to answer based on the closest relevant information in the context.
+                If no related information exists at all, say: "ပေးထားသော အချက်အလက်များထဲတွင် ထိုအကြောင်းအရာ မပါဝင်ပါ။" """
 
         user_content = f"Context:\n{context}\n\nQuestion: {question}"
 
-        response = groq_client.chat.completions.create(
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
             ],
-            model="llama-3.1-8b-instant"
+            temperature=0.2
         )
         
         return {"answer": response.choices[0].message.content}
@@ -248,3 +254,4 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+    
