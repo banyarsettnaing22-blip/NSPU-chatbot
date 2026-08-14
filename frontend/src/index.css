@@ -1,7 +1,7 @@
 @import "tailwindcss";
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Padauk:wght@400;700&display=swap" rel="stylesheet">
+
+/* 🇲🇲 Google Font (Padauk) ကို CSS ထဲသို့ တိုက်ရိုက် Import လုပ်ခြင်း */
+@import url('https://fonts.googleapis.com/css2?family=Padauk:wght@400;700&display=swap');
 
 @layer base {
   html, body, #root {
@@ -9,8 +9,10 @@
     padding: 0;
     height: 100%;
     width: 100%;
-    background-color: #020617 !important; /* Force bg-slate-950 */
-    color: #f1f5f9 !important;            /* Force text-slate-100 */
-    font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+    /* Tailwind CSS Variable များကို ပုံမှန်အလုပ်လုပ်ခွင့်ပေးရန် !important များကို ဖယ်ရှားထားပါသည် */
+    background-color: #f8fafc; 
+    color: #0f172a;
+    /* မြန်မာစာ ပုံမှန်အတိုင်း သပ်ရပ်စွာ ပေါ်စေရန် Padauk Font ကို ရှေ့ဆုံးမှ သတ်မှတ်ထားသည် */
+    font-family: 'Padauk', ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
   }
 }

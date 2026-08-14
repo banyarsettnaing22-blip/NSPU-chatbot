@@ -1,5 +1,36 @@
+# ==========================================
+# 1. Security & Environment Variables (API Keys)
+# ==========================================
+.env
+.env.*
+!.env.example
+*.local
+
+# ==========================================
+# 2. Python Backend & Virtual Environment
+# ==========================================
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.sqlite3
+
+# Vector Database (Local Storage)
+nspu_vector_db/
+
+# ==========================================
+# 3. Frontend & Node Modules
+# ==========================================
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+dist-ssr/
+
 # Logs
-logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -7,16 +38,14 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
-
-# Editor directories and files
+# ==========================================
+# 4. Editor directories & OS Files
+# ==========================================
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj

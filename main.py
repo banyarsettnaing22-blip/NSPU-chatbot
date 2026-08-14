@@ -3,12 +3,19 @@ import json
 import pymysql
 import chromadb
 from typing import List
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
-from fastapi.middleware.cors import CORSMiddleware  # 🔑 CORS Import ထည့်သွင်းထားသည်
+
+# 🔑 .env ဖိုင်ထဲမှ Environment Variables များကို ဖတ်ရန် load_dotenv ကို Import လုပ်ပါ
+from dotenv import load_dotenv
+
+# 🔑 .env ဖိုင်ကို Memory ထဲသို့ Load လုပ်ပါ
+load_dotenv()
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Header
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Groq Official Client Library
-from groq import Groq
+# OpenAI Official Client Library
+from openai import OpenAI
 
 # Local Offline Embedding Library
 from sentence_transformers import SentenceTransformer
@@ -18,29 +25,30 @@ from docx2txt import process as docx_process
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-app = FastAPI(title="NSPU Guide Chatbot Backend (Groq + Local Embeddings)")
+app = FastAPI(title="NSPU Guide Chatbot Backend (OpenAI + Local Embeddings)")
 
-# 🔑 CORS Middleware - React Frontend (http://localhost:5173) မှ လာသော Request များကို ခွင့်ပြုရန်
+# 🔑 CORS Middleware - React Frontend မှ Custom Headers များကို သေချာ ခွင့်ပြုရန်
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 # --- CONFIGURATION ---
 DB_CONFIG = {
     "host": "localhost",
     "user": "root",
-    "password": "root",  # <--- သင်၏ MySQL Password ထည့်ပါ
+    "password": "NewPassword123!",  # <--- သင်၏ MySQL Password
     "database": "nspu_db",
     "cursorclass": pymysql.cursors.DictCursor
 }
 
-# ⚠️ Groq API Key
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-groq_client = Groq(api_key=GROQ_API_KEY)
+# ⚠️ OpenAI API Key
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Local Embedding Model (Offline Mode)
 print("💡 Loading Local Embedding Model...")
@@ -52,6 +60,20 @@ except Exception:
 # MySQL Connection Function
 def get_db_connection():
     return pymysql.connect(**DB_CONFIG)
+
+# 🔑 Database မှ Admin Password ကို စစ်ဆေးပေးသည့် Helper Function
+def verify_admin_password(input_password: str) -> bool:
+    if not input_password:
+        return False
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            sql = "SELECT id FROM admin_users WHERE password = %s"
+            cursor.execute(sql, (input_password,))
+            result = cursor.fetchone()
+            return result is not None
+    finally:
+        connection.close()
 
 # WebSocket Manager
 class DashboardConnectionManager:
@@ -72,7 +94,7 @@ class DashboardConnectionManager:
 manager = DashboardConnectionManager()
 
 class CommentInput(BaseModel):
-    user_role: str
+    user_role: str = "Student"
     comment_text: str
 
 # --- Local Embedding Function ---
@@ -80,7 +102,7 @@ def get_text_embedding(text: str):
     embedding = embed_model.encode(text)
     return embedding.tolist()
 
-# --- TASK 4: ABSA Analysis via Groq ---
+# --- ABSA Analysis via OpenAI ---
 def analyze_comment_absa(text: str):
     prompt = f"""
     Analyze the school feedback comment. Extract the specific "aspect" (Choose one: Canteen, Teaching, Facility, Environment, Administrative) 
@@ -91,36 +113,52 @@ def analyze_comment_absa(text: str):
     """
 
     try:
-        response = groq_client.chat.completions.create(
+        response = openai_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",
+            model="gpt-4o-mini",
             response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
-        print(f"Groq ABSA Error: {e}")
+        print(f"OpenAI ABSA Error: {e}")
         return {"aspect": "General", "sentiment": "Neutral"}
 
-# --- TASK 2: RAG System (Vector DB) ---
+# --- RAG System (Vector DB - Multiple Word & PDF Files Support) ---
 def init_vector_db():
     extracted_text = ""
+    processed_files_count = 0
     
-    word_file = "nspu_guide_info.docx"
-    if os.path.exists(word_file):
-        print("💡 Processing Word File...")
-        extracted_text += docx_process(word_file) + "\n\n"
-        
-    pdf_file = "nspu_guide_info.pdf"
-    if os.path.exists(pdf_file):
-        print("💡 Processing PDF File...")
-        reader = PdfReader(pdf_file)
-        for page in reader.pages:
-            t = page.extract_text()
-            if t:
-                extracted_text += t + "\n"
+    # 💡 Folder ထဲရှိ .docx နှင့် .pdf ဖိုင်အားလုံးကို ရှာဖွေဖတ်ရှုခြင်း
+    for file in os.listdir("."):
+        # Word Files (.docx) ဖတ်ခြင်း (ယာယီဖိုင် ~$ မပါ)
+        if file.endswith(".docx") and not file.startswith("~$"):
+            print(f"💡 Processing Word File: {file}...")
+            try:
+                text = docx_process(file)
+                if text:
+                    extracted_text += f"\n--- Source Document: {file} ---\n" + text + "\n\n"
+                    processed_files_count += 1
+            except Exception as e:
+                print(f"⚠️ Error reading {file}: {e}")
+                
+        # PDF Files (.pdf) ဖတ်ခြင်း
+        elif file.endswith(".pdf"):
+            print(f"💡 Processing PDF File: {file}...")
+            try:
+                reader = PdfReader(file)
+                pdf_text = ""
+                for page in reader.pages:
+                    t = page.extract_text()
+                    if t:
+                        pdf_text += t + "\n"
+                if pdf_text:
+                    extracted_text += f"\n--- Source Document: {file} ---\n" + pdf_text + "\n\n"
+                    processed_files_count += 1
+            except Exception as e:
+                print(f"⚠️ Error reading {file}: {e}")
 
     if extracted_text.strip():
-        print("💡 Creating Vector Database with Local Embeddings...")
+        print(f"💡 Creating Vector Database from {processed_files_count} file(s) with Local Embeddings...")
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
         chunks = text_splitter.split_text(extracted_text)
         
@@ -145,15 +183,18 @@ def init_vector_db():
             embeddings=embeddings,
             ids=ids
         )
-        print("✅ Vector DB Created Successfully!")
+        print(f"✅ Vector DB Created Successfully! (Total Chunks: {len(chunks)})")
     else:
-        print("⚠️ Warning: Neither nspu_guide_info.docx nor nspu_guide_info.pdf was found.")
+        print("⚠️ Warning: No .docx or .pdf documents found to build the Vector Database.")
 
+# Server စတင်ချိန်တွင် Vector DB ကို တည်ဆောက်ခြင်း
 init_vector_db()
 
 # --- API ENDPOINTS ---
 
+# 1. User Feedback / Comments ထည့်သွင်းသည့် API
 @app.post("/api/comments")
+@app.post("/api/feedback")
 async def create_comment(data: CommentInput):
     connection = get_db_connection()
     try:
@@ -190,6 +231,7 @@ async def create_comment(data: CommentInput):
     finally:
         connection.close()
 
+# 2. Chatbot မေးခွန်းမေးသည့် API
 @app.get("/api/ask")
 async def ask_chatbot(question: str = Query(..., description="ကျောင်းအကြောင်းမေးခွန်းများ")):
     if not os.path.exists("./nspu_vector_db"):
@@ -202,7 +244,7 @@ async def ask_chatbot(question: str = Query(..., description="ကျောင်
         
         results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=3
+            n_results=10
         )
         
         context_list = results["documents"][0] if results["documents"] else []
@@ -214,12 +256,12 @@ If the answer cannot be found in the context, say honestly that you don't know b
 
         user_content = f"Context:\n{context}\n\nQuestion: {question}"
 
-        response = groq_client.chat.completions.create(
+        response = openai_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
             ],
-            model="llama-3.1-8b-instant"
+            model="gpt-4o-mini"
         )
         
         return {"answer": response.choices[0].message.content}
@@ -227,6 +269,50 @@ If the answer cannot be found in the context, say honestly that you don't know b
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# 3. ADMIN: Comments အားလုံးကို ဆွဲထုတ်ပေးမည့် API (Database မှ Password ဖြင့် စစ်ဆေးခြင်း)
+@app.get("/api/admin/comments")
+async def get_all_comments(x_admin_secret: str = Header(None)):
+    if not verify_admin_password(x_admin_secret):
+        raise HTTPException(status_code=401, detail="Unauthorized Access")
+        
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            sql = """
+                SELECT c.id, c.user_role, c.comment_text, c.created_at, 
+                       a.aspect, a.sentiment 
+                FROM comments c
+                LEFT JOIN absa_results a ON c.id = a.comment_id
+                ORDER BY c.created_at DESC
+            """
+            cursor.execute(sql)
+            results = cursor.fetchall()
+            return {"status": "success", "data": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        connection.close()
+
+# 4. ADMIN: Comment ကို ဖျက်ပေးမည့် API (Database မှ Password ဖြင့် စစ်ဆေးခြင်း)
+@app.delete("/api/admin/comments/{comment_id}")
+async def delete_comment(comment_id: int, x_admin_secret: str = Header(None)):
+    if not verify_admin_password(x_admin_secret):
+        raise HTTPException(status_code=401, detail="Unauthorized Access")
+        
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM absa_results WHERE comment_id = %s", (comment_id,))
+            cursor.execute("DELETE FROM comments WHERE id = %s", (comment_id,))
+        connection.commit()
+        return {"status": "success", "message": f"Comment {comment_id} deleted."}
+    except Exception as e:
+        connection.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        connection.close()
+
+# 5. WEBSOCKET Endpoint
 @app.websocket("/ws/dashboard")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
@@ -236,6 +322,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
+# 💡 SERVER STARTUP
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
