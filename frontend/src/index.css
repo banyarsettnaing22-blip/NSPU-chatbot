@@ -1,7 +1,9 @@
+@import url('https://fonts.googleapis.com/css2?family=Padauk:wght@400;700&display=swap');
 @import "tailwindcss";
 
+
 /* 🇲🇲 Google Font (Padauk) ကို CSS ထဲသို့ တိုက်ရိုက် Import လုပ်ခြင်း */
-@import url('https://fonts.googleapis.com/css2?family=Padauk:wght@400;700&display=swap');
+
 
 @layer base {
   html, body, #root {
