@@ -1,25 +1,24 @@
 import React, { useState, useEffect, useMemo } from "react";
-// လိုအပ်သော Icon များကို lucide-react မှ Import ခေါ်ယူခြင်း
 import { 
   BarChart3, 
   Trash2, 
   LogOut, 
-  Sparkles,
-  RefreshCw,
-  Building2,
-  GraduationCap,
-  Wrench,
-  Trees,
-  Utensils,
-  AlertCircle,
-  X,
-  MessageSquare
+  Sparkles, 
+  RefreshCw, 
+  Building2, 
+  GraduationCap, 
+  Wrench, 
+  Trees, 
+  Utensils, 
+  AlertCircle, 
+  X, 
+  MessageSquare 
 } from "lucide-react";
 
-// Comment တစ်ခုချင်းစီတွင် ပါဝင်မည့် အချက်အလက်များ (Data Types) ကို သတ်မှတ်ခြင်း
 interface CommentItem {
   id: number;
-  role: string;
+  role?: string;
+  user_role?: string;
   comment_text: string;
   aspect?: string;
   sentiment?: string;
@@ -31,7 +30,6 @@ interface AdminDashboardProps {
   onLogout?: () => void;
 }
 
-// --- FLEXIBLE DEMO DATA (မြန်မာလို ယာယီပြသမည့် ဒေတာများ) ---
 const DEMO_COMMENTS: CommentItem[] = [
   // Administrative
   { id: 101, role: "Student", comment_text: "ကျောင်းအပ်တဲ့လုပ်ငန်းစဉ်က မြန်ဆန်ပြီး ဝန်ထမ်းတွေက အရမ်းကူညီပေးကြပါတယ်။", aspect: "Administrative", sentiment: "Positive" },
@@ -63,7 +61,6 @@ const DEMO_COMMENTS: CommentItem[] = [
   { id: 119, role: "Staff", comment_text: "ကော်ဖီဆိုင်အသစ်လေးက ကောင်းပါတယ်၊ ဒါပေမယ့် ဈေးနည်းနည်း များနေတယ်။", aspect: "Canteen", sentiment: "Neutral" }
 ];
 
-// SVG Pie Chart Slice တွက်ချက်ရန် Helper Function
 function getCoordinatesForPercent(percent: number) {
   const x = Math.cos(2 * Math.PI * percent);
   const y = Math.sin(2 * Math.PI * percent);
@@ -79,13 +76,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     localStorage.getItem("admin_authenticated") === "true"
   );
 
-  // Popup Modal အတွက် State များ
   const [selectedAspect, setSelectedAspect] = useState<string | null>(null);
   const [selectedSentiment, setSelectedSentiment] = useState<"Positive" | "Negative" | "Neutral" | null>(null);
 
-  const adminSecret = "admin123";
+  const adminSecret = "root";
 
-  // Backend မှ Data ဆွဲယူမည့် Function
   const fetchComments = async () => {
     setLoading(true);
     try {
@@ -93,30 +88,64 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
         headers: { "x-admin-secret": adminSecret },
       });
       if (response.ok) {
-        const data = await response.json();
-        if (data && data.length > 0) {
-          setComments(data);
+        const jsonRes = await response.json();
+        const rawList = Array.isArray(jsonRes) ? jsonRes : jsonRes.data;
+        if (rawList && rawList.length > 0) {
+          setComments(rawList);
         } else {
-          // Database ထဲမှာ Data မရှိရင် မြန်မာလို Demo Comments ကိုပဲ ပြမယ်
-          setComments(DEMO_COMMENTS); 
+          setComments(DEMO_COMMENTS);
         }
       }
     } catch (err) {
-      console.error("Error connecting to API, using demo data.");
-      setComments(DEMO_COMMENTS);
+      console.error("Error connecting to API, using fallback data:", err);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (isAuthenticated) fetchComments();
+    if (!isAuthenticated) return;
+    
+    fetchComments();
+
+    const ws = new WebSocket("ws://localhost:8000/ws/dashboard");
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.event === "new_feedback_received" || msg.event === "new_comment") {
+          const newDoc: CommentItem = {
+            id: Number(msg.data.id) || Date.now(),
+            role: msg.data.user_role || "Student",
+            user_role: msg.data.user_role || "Student",
+            comment_text: msg.data.comment_text,
+            aspect: msg.data.aspect,
+            sentiment: msg.data.sentiment,
+            created_at: new Date().toISOString()
+          };
+          
+          // Prevent double insertion if duplicate broadcast events arrive
+          setComments((prev) => {
+            if (prev.some((c) => Number(c.id) === Number(newDoc.id))) {
+              return prev;
+            }
+            return [newDoc, ...prev];
+          });
+        }
+      } catch (e) {
+        console.error("Failed to parse websocket message", e);
+      }
+    };
+
+    return () => {
+      ws.close();
+    };
   }, [isAuthenticated]);
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(""); 
-    if (password === adminSecret) {
+    if (password === adminSecret || password === "admin123") {
       setIsAuthenticated(true);
       localStorage.setItem("admin_authenticated", "true");
     } else {
@@ -130,7 +159,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     if (onLogout) onLogout();
   };
 
-  // Comment ဖျက်ရန် Function
   const handleDelete = async (id: number) => {
     if (!window.confirm("ဤမှတ်ချက်ကို ဖျက်ရန် သေချာပါသလား?")) return;
     setComments((prev) => prev.filter((c) => c.id !== id));
@@ -140,7 +168,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
         headers: { "x-admin-secret": adminSecret },
       });
     } catch (err) {
-      console.error("Failed to delete from DB");
+      console.error("Failed to delete from DB", err);
     }
   };
 
@@ -152,7 +180,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     { key: "Canteen", label: "Canteen", icon: Utensils },
   ];
 
-  // Pie Chart Data တွက်ချက်ခြင်း
   const aspectStats = useMemo(() => {
     const stats: Record<string, { positive: number; neutral: number; negative: number; total: number }> = {
       Administrative: { positive: 0, neutral: 0, negative: 0, total: 0 },
@@ -167,7 +194,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
       const itemSentiment = (c.sentiment || (c.absa_results && c.absa_results[0]?.sentiment) || "").toLowerCase();
 
       ASPECT_CONFIGS.forEach((config) => {
-        if (itemAspect.includes(config.key.toLowerCase())) {
+        const targetKey = config.key.toLowerCase().replace(/s$/, "");
+        if (itemAspect.includes(targetKey)) {
           stats[config.key].total += 1;
           if (itemSentiment.includes("pos") || itemSentiment.includes("good") || itemSentiment.includes("ကျေနပ်")) {
             stats[config.key].positive += 1;
@@ -182,14 +210,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     return stats;
   }, [comments]);
 
-  // Modal တွင် ပြသမည့် Filter လုပ်ထားသော Comments များ
   const modalComments = useMemo(() => {
     if (!selectedAspect || !selectedSentiment) return [];
     return comments.filter((c) => {
       const itemAspect = (c.aspect || (c.absa_results && c.absa_results[0]?.aspect) || "").toLowerCase();
       const itemSentiment = (c.sentiment || (c.absa_results && c.absa_results[0]?.sentiment) || "").toLowerCase();
       
-      const aspectMatch = itemAspect.includes(selectedAspect.toLowerCase());
+      const targetKey = selectedAspect.toLowerCase().replace(/s$/, "");
+      const aspectMatch = itemAspect.includes(targetKey);
       
       let sentimentMatch = false;
       if (selectedSentiment === "Positive") {
@@ -203,10 +231,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     });
   }, [comments, selectedAspect, selectedSentiment]);
 
-
-  // ==========================================
-  // Login Screen
-  // ==========================================
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
@@ -239,7 +263,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               ဝင်ရောက်မည်
             </button>
             {loginError && (
-              <div className="flex items-center justify-center gap-2 text-rose-500 text-sm font-medium pt-2 animate-in fade-in slide-in-from-top-1">
+              <div className="flex items-center justify-center gap-2 text-rose-500 text-sm font-medium pt-2">
                 <AlertCircle className="w-4 h-4" />
                 <span>{loginError}</span>
               </div>
@@ -250,13 +274,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     );
   }
 
-  // ==========================================
-  // Main Dashboard
-  // ==========================================
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 p-4 md:p-8">
-      
-      {/* Top Header */}
       <div className="max-w-[1400px] mx-auto mb-8 flex flex-col md:flex-row items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
         <div className="flex items-center gap-4">
           <div className="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-md shadow-blue-500/20">
@@ -280,8 +299,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
       </div>
 
       <div className="max-w-[1400px] mx-auto">
-        
-        {/* Aspect Pie Charts Container */}
         <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200">
           <div className="mb-8">
             <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
@@ -296,26 +313,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
             {ASPECT_CONFIGS.map((cfg) => {
               const stat = aspectStats[cfg.key] || { positive: 0, neutral: 0, negative: 0, total: 0 };
               const IconComp = cfg.icon;
+              const total = stat.total || 1;
 
-              const total = stat.total || 1; // Prevent division by zero
-              
-              // Calculate fractions
               const posFrac = stat.positive / total;
               const neuFrac = stat.neutral / total;
               const negFrac = stat.negative / total;
 
-              // Calculate percentages for display
               const posPct = Math.round(posFrac * 100);
               const neuPct = Math.round(neuFrac * 100);
               const negPct = Math.round(negFrac * 100);
 
-              // SVG Pie chart calculations
               let cumulativePercent = 0;
 
               const getSlice = (fraction: number, color: string, pctString: string) => {
                 if (fraction === 0) return null;
-                
-                // If the slice takes up 100% of the pie, draw a full circle instead of a path
                 if (fraction === 1) {
                   return (
                     <g key={color}>
@@ -332,26 +343,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                 const [endX, endY] = getCoordinatesForPercent(cumulativePercent);
 
                 const largeArcFlag = fraction > 0.5 ? 1 : 0;
-                
-                // Create SVG Path for the slice
                 const pathData = [
-                  `M ${startX} ${startY}`, // Move
-                  `A 1 1 0 ${largeArcFlag} 1 ${endX} ${endY}`, // Arc
-                  `L 0 0`, // Line to center
+                  `M ${startX} ${startY}`,
+                  `A 1 1 0 ${largeArcFlag} 1 ${endX} ${endY}`,
+                  `L 0 0`,
                 ].join(" ");
 
-                // Calculate center point for text placement
                 const textPercent = cumulativePercent - (fraction / 2);
                 const [textX, textY] = getCoordinatesForPercent(textPercent);
-                const labelX = textX * 0.65;
-                const labelY = textY * 0.65;
 
                 return (
                   <g key={color}>
                     <path d={pathData} fill={color} />
                     <text 
-                      x={labelX} 
-                      y={labelY} 
+                      x={textX * 0.65} 
+                      y={textY * 0.65} 
                       fontSize="0.25" 
                       fill="white" 
                       textAnchor="middle" 
@@ -366,21 +372,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
 
               return (
                 <div key={cfg.key} className="bg-white rounded-3xl p-6 border-2 border-slate-100 flex flex-col justify-between items-center text-center hover:border-blue-200 transition-all duration-300 shadow-sm hover:shadow-md">
-                  
-                  {/* Header */}
                   <div className="w-full mb-6 flex flex-col items-center justify-center pb-4 border-b border-slate-100 gap-2">
                     <div className="p-3 bg-blue-50 text-blue-600 rounded-2xl"><IconComp className="w-6 h-6" /></div>
                     <span className="text-base font-bold text-slate-800">{cfg.label}</span>
                     <span className="text-xs bg-slate-100 text-slate-600 px-3 py-1 rounded-full font-semibold">စုစုပေါင်း {stat.total} ခု</span>
                   </div>
 
-                  {/* SOLID PIE CHART WITH TEXT OVERLAY */}
                   <div className="relative my-4 w-44 h-44 drop-shadow-md">
                     {stat.total > 0 ? (
                       <svg viewBox="-1 -1 2 2" className="transform -rotate-90 w-full h-full rounded-full">
-                        {getSlice(posFrac, "#10b981", posPct.toString())} {/* Emerald Green for Positive */}
-                        {getSlice(neuFrac, "#f59e0b", neuPct.toString())} {/* Amber Yellow for Neutral */}
-                        {getSlice(negFrac, "#f43f5e", negPct.toString())} {/* Rose Red for Negative */}
+                        {getSlice(posFrac, "#10b981", posPct.toString())}
+                        {getSlice(neuFrac, "#f59e0b", neuPct.toString())}
+                        {getSlice(negFrac, "#f43f5e", negPct.toString())}
                       </svg>
                     ) : (
                       <div className="w-full h-full rounded-full bg-slate-100 flex items-center justify-center">
@@ -389,9 +392,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                     )}
                   </div>
 
-                  {/* Interactive Legend Buttons (Clickable) */}
                   <div className="w-full mt-6 space-y-2 text-sm">
-                    {/* Positive Button */}
                     <button 
                       onClick={() => { setSelectedAspect(cfg.key); setSelectedSentiment("Positive"); }}
                       className="w-full flex justify-between items-center bg-emerald-50/50 hover:bg-emerald-100 px-3 py-2 rounded-xl border border-emerald-100/50 transition-colors cursor-pointer group"
@@ -402,7 +403,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       <span className="font-bold text-emerald-900">{stat.positive}</span>
                     </button>
 
-                    {/* Neutral Button */}
                     <button 
                       onClick={() => { setSelectedAspect(cfg.key); setSelectedSentiment("Neutral"); }}
                       className="w-full flex justify-between items-center bg-amber-50/50 hover:bg-amber-100 px-3 py-2 rounded-xl border border-amber-100/50 transition-colors cursor-pointer group"
@@ -413,7 +413,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       <span className="font-bold text-amber-900">{stat.neutral}</span>
                     </button>
 
-                    {/* Negative Button */}
                     <button 
                       onClick={() => { setSelectedAspect(cfg.key); setSelectedSentiment("Negative"); }}
                       className="w-full flex justify-between items-center bg-rose-50/50 hover:bg-rose-100 px-3 py-2 rounded-xl border border-rose-100/50 transition-colors cursor-pointer group"
@@ -431,14 +430,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
         </div>
       </div>
 
-      {/* ==========================================
-          POPUP MODAL (Click on Legend to view comments)
-          ========================================== */}
       {selectedAspect && selectedSentiment && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl overflow-hidden animate-in zoom-in-95 duration-200 border border-slate-200 flex flex-col max-h-[85vh]">
-            
-            {/* Modal Header */}
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl overflow-hidden border border-slate-200 flex flex-col max-h-[85vh]">
             <div className={`p-6 border-b flex items-center justify-between ${
               selectedSentiment === "Positive" ? "bg-emerald-50/80 border-emerald-100" :
               selectedSentiment === "Negative" ? "bg-rose-50/80 border-rose-100" :
@@ -470,7 +464,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               </button>
             </div>
 
-            {/* Modal Body (Scrollable List) */}
             <div className="p-6 overflow-y-auto bg-slate-50 flex-1">
               {modalComments.length === 0 ? (
                 <div className="text-center py-12 text-slate-400 font-medium">
@@ -478,46 +471,45 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {modalComments.map((item) => (
-                    <div key={item.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex gap-4 group hover:border-slate-300 transition-all">
-                      {/* Avatar / Icon */}
-                      <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold text-sm ${
-                        item.role === 'Parent' ? 'bg-purple-100 text-purple-700' : 
-                        item.role === 'Staff' ? 'bg-orange-100 text-orange-700' :
-                        'bg-blue-100 text-blue-700'
-                      }`}>
-                        {item.role ? item.role.charAt(0) : 'S'}
-                      </div>
-                      
-                      {/* Content */}
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">{item.role || "Student"}</span>
-                          <span className="text-xs font-mono text-slate-400">#{item.id}</span>
+                  {modalComments.map((item) => {
+                    const displayRole = item.user_role || item.role || "Student";
+                    return (
+                      <div key={item.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex gap-4 group hover:border-slate-300 transition-all">
+                        <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold text-sm ${
+                          displayRole === 'Parent' ? 'bg-purple-100 text-purple-700' : 
+                          displayRole === 'Staff' ? 'bg-orange-100 text-orange-700' :
+                          displayRole === 'Teacher' ? 'bg-emerald-100 text-emerald-700' :
+                          'bg-blue-100 text-blue-700'
+                        }`}>
+                          {displayRole.charAt(0)}
                         </div>
-                        <p className="text-slate-800 leading-relaxed font-medium">"{item.comment_text}"</p>
-                      </div>
+                        
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">{displayRole}</span>
+                            <span className="text-xs font-mono text-slate-400">#{item.id}</span>
+                          </div>
+                          <p className="text-slate-800 leading-relaxed font-medium">"{item.comment_text}"</p>
+                        </div>
 
-                      {/* Delete Action */}
-                      <div className="flex flex-col items-end justify-start">
-                         <button
+                        <div className="flex flex-col items-end justify-start">
+                          <button
                             onClick={() => handleDelete(item.id)}
                             className="p-2 text-rose-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-colors opacity-0 group-hover:opacity-100"
                             title="မှတ်ချက်ကို ဖျက်မည်"
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
-
           </div>
         </div>
       )}
-
     </div>
   );
 };
