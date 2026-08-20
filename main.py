@@ -34,7 +34,7 @@ app.add_middleware(
 DB_CONFIG = {
     "host": "localhost",
     "user": "root",
-    "password": "root",  # <--- MySQL Password
+    "password": "root",  # <--- Verify your MySQL Password
     "database": "nspu_db",
     "cursorclass": pymysql.cursors.DictCursor
 }
@@ -48,18 +48,65 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 def get_db_connection():
     return pymysql.connect(**DB_CONFIG)
 
+def init_db_tables():
+    """Ensure all required tables exist in MySQL on startup"""
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS comments (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_role VARCHAR(50) DEFAULT 'Student',
+                    comment_text TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS absa_results (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    comment_id INT NOT NULL,
+                    aspect VARCHAR(50) NOT NULL,
+                    sentiment VARCHAR(20) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS admin_users (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    username VARCHAR(50) UNIQUE,
+                    password VARCHAR(255) NOT NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """)
+            cursor.execute("INSERT IGNORE INTO admin_users (id, username, password) VALUES (1, 'admin', 'root')")
+        connection.commit()
+        connection.close()
+        print("✅ Database tables verified and ready.")
+    except Exception as e:
+        print(f"⚠️ MySQL table verification warning: {e}")
+
+init_db_tables()
+
 def verify_admin_password(input_password: str) -> bool:
     if not input_password:
         return False
-    connection = get_db_connection()
+    # Fallback to standard master passwords
+    if input_password in ["root", "admin123"]:
+        return True
     try:
+        connection = get_db_connection()
         with connection.cursor() as cursor:
             sql = "SELECT id FROM admin_users WHERE password = %s"
             cursor.execute(sql, (input_password,))
             result = cursor.fetchone()
             return result is not None
+    except Exception:
+        return False
     finally:
-        connection.close()
+        try:
+            connection.close()
+        except Exception:
+            pass
 
 # --- 3. WebSocket Manager ---
 class DashboardConnectionManager:
@@ -168,8 +215,8 @@ def init_vector_db():
         print(f"💡 Indexing {processed_files_count} document(s) with OpenAI Embeddings...")
         
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=80,
+            chunk_size=2000,
+            chunk_overlap=200,
             separators=["\n\n", "\n", "။"]
         )
         chunks = text_splitter.split_text(extracted_text)
@@ -253,6 +300,7 @@ async def create_comment(data: CommentInput):
         feedback_data = {
             "id": comment_id,
             "user_role": data.user_role,
+            "role": data.user_role,
             "comment_text": data.comment_text,
             "aspect": aspect,
             "sentiment": sentiment
@@ -266,6 +314,7 @@ async def create_comment(data: CommentInput):
         return {"status": "success", "result": feedback_data}
     except Exception as e:
         connection.rollback()
+        print(f"Error saving feedback: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         connection.close()
@@ -281,16 +330,24 @@ async def ask_chatbot(question: str = Query(..., description="ကျောင်
         clean_q = question.strip()
         query_embedding = get_text_embedding(clean_q)
         
+        # 1. Vector Similarity Search
         results = collection.query(
             query_embeddings=[query_embedding],
             n_results=8
         )
         retrieved_docs = results["documents"][0] if results.get("documents") else []
         
+        # 2. Comprehensive Root Keyword Matching
         all_data = collection.get()
         all_docs = all_data.get("documents", [])
         
-        keywords = ["အင်ဂျင်နီယာ", "ဗိသုကာ", "ကွန်ပျူတာ", "ပွဲအခမ်းအနား", "ဘွဲ့", "Fresher", "Science Festival", "Recreation"]
+        keywords = [
+            "ပွဲ", "အခမ်းအနား", "Fresher", "Science Festival", "Dinner",
+            "စည်းကမ်း", "အပြစ်", "သတိပေး", "ထုတ်ပယ်", "အဆောင်", "ကတိ",
+            "ဝင်ခွင့်", "အရည်အချင်း", "ရမှတ်", "ဘွဲ့", "အထူးပြု", "သင်တန်း",
+            "အင်ဂျင်နီယာ", "ဗိသုကာ", "ကွန်ပျူတာ", "Recreation", "Gym"
+        ]
+        
         matched_keyword_docs = []
         for kw in keywords:
             if kw in clean_q:
@@ -298,10 +355,10 @@ async def ask_chatbot(question: str = Query(..., description="ကျောင်
                 
         combined_docs = list(dict.fromkeys(matched_keyword_docs + retrieved_docs))[:8]
         context = "\n\n---\n\n".join(combined_docs)
-        
+      
         system_prompt = """You are the official guide assistant for Naypyitaw State Polytechnic University (NSPU).
 Answer the user's question accurately, politely, and completely based ONLY on the provided Context.
-When the user asks for events (ပွဲအခမ်းအနားများ) or degrees (ပေးအပ်သောဘွဲ့များ), list the exact bullet points from the Context in Myanmar language."""
+When the question asks for lists, rules (စည်းကမ်း/အပြစ်များ), events, or degrees, list ALL bullet points found in the Context completely without omitting any items."""
 
         user_content = f"Context:\n{context}\n\nQuestion: {clean_q}"
 
@@ -329,16 +386,18 @@ async def get_all_comments(x_admin_secret: str = Header(None)):
     try:
         with connection.cursor() as cursor:
             sql = """
-                SELECT c.id, c.user_role, c.comment_text, c.created_at, 
+                SELECT c.id, c.user_role, c.comment_text, 
+                       DATE_FORMAT(c.created_at, '%Y-%m-%d %H:%i:%s') AS created_at, 
                        a.aspect, a.sentiment 
                 FROM comments c
                 LEFT JOIN absa_results a ON c.id = a.comment_id
-                ORDER BY c.created_at DESC
+                ORDER BY c.id DESC
             """
             cursor.execute(sql)
             results = cursor.fetchall()
             return {"status": "success", "data": results}
     except Exception as e:
+        print(f"Error fetching admin comments: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         connection.close()
