@@ -81,7 +81,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   const [selectedAspect, setSelectedAspect] = useState<string | null>(null);
   const [selectedSentiment, setSelectedSentiment] = useState<"Positive" | "Negative" | "Neutral" | null>(null);
 
-  // Smooth Auto-Looping Feed Motion States
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -146,24 +145,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     };
   }, [isAuthenticated]);
 
-  // Smooth Loop Animation Tick
+  // Smooth Looping: Resumes exactly from the current scroll position without resetting
   useEffect(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
 
-    const interval = setInterval(() => {
-      if (!isPaused && el) {
-        // Continuous upward glide
-        el.scrollTop += 0.8;
+    let animationFrameId: number;
 
-        // Infinite loop reset when reaching bottom
-        if (el.scrollTop >= el.scrollHeight - el.clientHeight - 2) {
+    const step = () => {
+      if (!isPaused && el) {
+        el.scrollTop += 0.6; // Controlled gliding speed
+
+        // Only wrap to top when reaching the very bottom of the entire feed list
+        if (el.scrollTop >= el.scrollHeight - el.clientHeight - 1) {
           el.scrollTop = 0;
         }
       }
-    }, 30);
+      animationFrameId = requestAnimationFrame(step);
+    };
 
-    return () => clearInterval(interval);
+    animationFrameId = requestAnimationFrame(step);
+
+    return () => cancelAnimationFrame(animationFrameId);
   }, [isPaused, comments]);
 
   const handleLogin = (e: React.FormEvent) => {
@@ -462,7 +465,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           </div>
         </div>
 
-        {/* Right Side: Realtime Live Streaming Feed with Smooth Loop Motion */}
+        {/* Right Side: Realtime Live Streaming Feed */}
         <div className="xl:col-span-4 bg-white text-slate-800 p-6 rounded-3xl shadow-sm border border-slate-200 flex flex-col justify-between h-[680px]">
           <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-100">
             <div className="flex items-center gap-2">
@@ -471,7 +474,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[10px] text-slate-400 font-mono">
-                {isPaused ? "⏸️ Paused" : "▶️ Auto-Gliding"}
+                {isPaused ? "⏸️ Paused" : "▶️ Gliding"}
               </span>
               <span className="text-[11px] font-mono text-slate-600 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200">
                 {comments.length} total
@@ -479,28 +482,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
             </div>
           </div>
 
-          {/* Smooth Auto-Gliding Scroll Container (Pauses on Hover) */}
+          {/* Gliding Container: Single list that preserves manual scroll position */}
           <div 
             ref={scrollContainerRef}
             onMouseEnter={() => setIsPaused(true)}
             onMouseLeave={() => setIsPaused(false)}
-            className="flex-1 overflow-y-auto space-y-3 pr-1.5 transition-all scroll-smooth"
+            className="flex-1 overflow-y-auto space-y-3 pr-1.5 select-none"
+            style={{ scrollBehavior: "auto" }}
           >
             {comments.length === 0 ? (
               <div className="h-full flex items-center justify-center text-slate-400 text-xs">
                 မှတ်ချက်များ စောင့်ဆိုင်းနေပါသည်...
               </div>
             ) : (
-              // Duplicate comments list to guarantee seamless infinite loop gliding
-              [...comments, ...comments].map((item, index) => {
+              comments.map((item) => {
                 const AspectIcon = item.aspect ? ASPECT_ICONS[item.aspect] || MessageSquare : MessageSquare;
                 const isPositive = item.sentiment?.toLowerCase().includes("pos");
                 const isNegative = item.sentiment?.toLowerCase().includes("neg");
 
                 return (
                   <div
-                    key={`${item.id}-${index}`}
-                    className="bg-slate-50/80 border border-slate-200 hover:border-blue-400 hover:bg-white rounded-2xl p-3.5 transition-all duration-300 shadow-xs hover:shadow-md"
+                    key={`feed-${item.id}`}
+                    className="bg-slate-50/80 border border-slate-200 hover:border-blue-400 hover:bg-white rounded-2xl p-3.5 transition-colors duration-200 shadow-xs"
                   >
                     <div className="flex items-start justify-between gap-2 mb-1.5">
                       <div className="flex items-center gap-2">
