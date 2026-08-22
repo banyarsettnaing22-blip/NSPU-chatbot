@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { MessageSquarePlus } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 
 interface Message {
   id: string;
@@ -8,11 +9,13 @@ interface Message {
   timestamp: string;
 }
 
-// 🇲🇲 မြန်မာ Unicode စာလုံးအစီအစဉ် မှားယွင်းမှုများကို အလိုအလျောက် ပြန်လည်ပြုပြင်ပေးသည့် Function
+// 🇲🇲 မြန်မာ Unicode စာလုံးအစီအစဉ်နှင့် Format အမှိုက်များ အလိုအလျောက် ပြင်ဆင်ပေးသည့် Function
 const fixMyanmarUnicode = (text: string): string => {
   if (!text) return '';
   return text
     .normalize('NFC')
+    .replace(/^#{1,6}\s*(.+)$/gm, '**$1**') // Converts any # or ### into bold text
+    .replace(/\*\*\*/g, '**')              // Strips unwanted ***
     .replace(/\u1037\u1031/g, '\u1031\u1037')
     .replace(/\u1031\u1031/g, '\u1031')
     .replace(/\u1036\u1037/g, '\u1037\u1036');
@@ -22,7 +25,7 @@ export default function Chatbot() {
   const [messages, setMessages] = useState<Message[]>([
     { 
       id: '1', 
-      text: 'မင်္ဂလာပါ! NSPU Guide Chatbot မှ ကြိုဆိုပါတယ်။ ဘာများ ကူညီပေးရမလဲခင်ဗျာ။', 
+      text: 'မင်္ဂလာပါ! **NSPU Guide Chatbot** မှ ကြိုဆိုပါတယ်။ ကျောင်းနှင့်ပတ်သက်၍ သိရှိလိုသည်များကို မေးမြန်းနိုင်ပါသည်။', 
       sender: 'bot', 
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
     }
@@ -136,12 +139,31 @@ export default function Chatbot() {
           {messages.map((msg) => (
             <div key={msg.id} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
               <div className={`
-                max-w-[85%] md:max-w-[75%] rounded-2xl p-4 text-sm md:text-base shadow-sm relative
+                max-w-[88%] md:max-w-[80%] rounded-2xl p-4 text-xs md:text-sm shadow-sm relative leading-relaxed
                 ${msg.sender === 'user' 
                   ? 'bg-blue-600 text-white rounded-br-none' 
-                  : 'bg-white text-slate-800 rounded-bl-none border border-slate-200'}
+                  : 'bg-white text-slate-800 rounded-bl-none border border-slate-200/90'}
               `}>
-                <p className="leading-relaxed whitespace-pre-line">{msg.text}</p>
+                {msg.sender === 'user' ? (
+                  <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
+                ) : (
+                  <div className="markdown-body font-['Padauk',sans-serif] space-y-2">
+                    <ReactMarkdown
+                      components={{
+                        p: ({ node, ...props }) => <p className="leading-relaxed mb-2 last:mb-0" {...props} />,
+                        strong: ({ node, ...props }) => (
+                          <strong className="font-bold text-slate-900" {...props} />
+                        ),
+                        ul: ({ node, ...props }) => <ul className="my-2 ml-4 list-disc space-y-1.5 text-slate-700" {...props} />,
+                        ol: ({ node, ...props }) => <ol className="my-2 ml-4 list-decimal space-y-1.5 text-slate-700" {...props} />,
+                        li: ({ node, ...props }) => <li className="pl-0.5 leading-relaxed" {...props} />
+                      }}
+                    >
+                      {msg.text}
+                    </ReactMarkdown>
+                  </div>
+                )}
+
                 <span className={`block text-[10px] text-right mt-2 ${msg.sender === 'user' ? 'text-blue-200' : 'text-slate-400'}`}>
                   {msg.timestamp}
                 </span>
@@ -151,9 +173,9 @@ export default function Chatbot() {
 
           {isLoading && (
             <div className="flex justify-start">
-              <div className="bg-white border border-slate-200 rounded-2xl p-3 text-slate-500 text-xs flex items-center gap-2">
+              <div className="bg-white border border-slate-200 rounded-2xl p-3 text-slate-500 text-xs flex items-center gap-2 shadow-xs">
                 <span className="w-2 h-2 bg-blue-500 rounded-full animate-ping"></span>
-                Processing request...
+                အချက်အလက်များ ရှာဖွေနေပါသည်...
               </div>
             </div>
           )}

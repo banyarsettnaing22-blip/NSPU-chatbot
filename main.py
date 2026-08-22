@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import pymysql
 import chromadb
@@ -90,7 +91,6 @@ init_db_tables()
 def verify_admin_password(input_password: str) -> bool:
     if not input_password:
         return False
-    # Fallback to standard master passwords
     if input_password in ["root", "admin123"]:
         return True
     try:
@@ -136,7 +136,20 @@ class CommentInput(BaseModel):
     manual_aspect: Optional[str] = None
     manual_sentiment: Optional[str] = None
 
-# --- 4. High-Precision OpenAI Embeddings ---
+# --- 4. Output Formatting & Sanitizer ---
+def sanitize_bot_response(text: str) -> str:
+    """Removes unwanted raw markdown characters like ### and *** while preserving structure"""
+    if not text:
+        return ""
+    # Convert ### Heading into bold **Heading**
+    cleaned = re.sub(r'^[#]+\s*(.+)$', r'**\1**', text, flags=re.MULTILINE)
+    # Strip unwanted triple asterisks
+    cleaned = cleaned.replace('***', '**')
+    # Standardize hyphen bullets to clean asterisk bullets
+    cleaned = re.sub(r'^\s*[-•]\s+', r'* ', cleaned, flags=re.MULTILINE)
+    return cleaned.strip()
+
+# --- 5. High-Precision OpenAI Embeddings ---
 def get_text_embedding(text: str):
     response = openai_client.embeddings.create(
         input=text,
@@ -151,7 +164,7 @@ def get_text_embeddings_batch(texts: List[str]):
     )
     return [item.embedding for item in response.data]
 
-# --- 5. Structured Document Extraction ---
+# --- 6. Structured Document Extraction ---
 def extract_text_from_docx(file_path: str) -> str:
     try:
         doc = docx.Document(file_path)
@@ -191,7 +204,7 @@ def extract_text_from_pdf(file_path: str) -> str:
         print(f"⚠️ Error reading {file_path}: {e}")
         return ""
 
-# --- 6. Intelligent Knowledge Base Initialization ---
+# --- 7. Intelligent Knowledge Base Initialization ---
 FULL_DOCUMENT_TEXT = ""
 DOCUMENT_CHUNKS = []
 
@@ -220,8 +233,8 @@ def init_vector_db():
         print(f"💡 Indexing {processed_files_count} document(s) with OpenAI Embeddings...")
         
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1500,
-            chunk_overlap=250,
+            chunk_size=3500,
+            chunk_overlap=600,
             separators=["\n\n", "\n", "။", "၊", " "]
         )
         DOCUMENT_CHUNKS = text_splitter.split_text(extracted_text)
@@ -247,7 +260,7 @@ def init_vector_db():
 
 init_vector_db()
 
-# --- 7. API Endpoints ---
+# --- 8. API Endpoints ---
 
 @app.post("/api/comments")
 @app.post("/api/feedback")
@@ -281,7 +294,6 @@ async def create_comment(data: CommentInput):
             aspect = analysis.get("aspect", "Administrative")
             sentiment = analysis.get("sentiment", "Neutral")
 
-        # Normalize Aspect & Sentiment
         if aspect in ["Facility", "Facilities"]:
             aspect = "Facilities"
 
@@ -335,7 +347,7 @@ async def ask_chatbot(question: str = Query(..., description="User Question")):
         raise HTTPException(status_code=400, detail="Knowledge base not ready.")
 
     try:
-        # Step 1: AI Query Expansion (Generates semantic variations & key concepts)
+        # Step 1: AI Query Expansion
         expand_prompt = f"""
         User Query: "{clean_q}"
         Task: Identify the core topic and generate 3 to 5 related Myanmar synonyms, English terms, and topic keywords.
@@ -353,7 +365,6 @@ async def ask_chatbot(question: str = Query(..., description="User Question")):
         except Exception:
             search_terms = [clean_q]
 
-        # Ensure original query is always included
         search_terms.append(clean_q)
 
         # Step 2: Semantic Vector Search
@@ -363,11 +374,11 @@ async def ask_chatbot(question: str = Query(..., description="User Question")):
         
         vec_results = collection.query(
             query_embeddings=[q_embedding],
-            n_results=6
+            n_results=10
         )
         matched_chunks = vec_results["documents"][0] if vec_results.get("documents") else []
 
-        # Step 3: Fuzzy Substring Search across all chunks using expanded terms
+        # Step 3: Fuzzy Substring Search across all chunks
         keyword_chunks = []
         for chunk in DOCUMENT_CHUNKS:
             for term in search_terms:
@@ -381,13 +392,12 @@ async def ask_chatbot(question: str = Query(..., description="User Question")):
             if c not in all_matched:
                 all_matched.append(c)
 
-        # Fallback: If matches are extremely low, provide the most relevant top sections
         if len(all_matched) < 2:
             all_matched = DOCUMENT_CHUNKS[:4]
 
         context = "\n\n---\n\n".join(all_matched[:8])
 
-        # Step 5: Flexible System Prompt for Comprehensive Answering
+        # Step 5: Original Prompt Conditions Kept Exactly Intact
         system_prompt = """You are the knowledgeable and polite student guide assistant for Naypyitaw State Polytechnic University (NSPU).
 Use the provided Context to answer the user's question completely in Myanmar Unicode (Padauk style).
 
@@ -408,7 +418,10 @@ Guidelines:
             temperature=0.1
         )
 
-        return {"answer": response.choices[0].message.content}
+        raw_answer = response.choices[0].message.content
+        cleaned_answer = sanitize_bot_response(raw_answer)
+
+        return {"answer": cleaned_answer}
 
     except Exception as e:
         print(f"Error answering question: {e}")
