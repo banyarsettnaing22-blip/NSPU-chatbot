@@ -191,8 +191,12 @@ def extract_text_from_pdf(file_path: str) -> str:
         print(f"⚠️ Error reading {file_path}: {e}")
         return ""
 
-# --- 6. Vector Database Initialization ---
+# --- 6. Intelligent Knowledge Base Initialization ---
+FULL_DOCUMENT_TEXT = ""
+DOCUMENT_CHUNKS = []
+
 def init_vector_db():
+    global FULL_DOCUMENT_TEXT, DOCUMENT_CHUNKS
     extracted_text = ""
     processed_files_count = 0
     
@@ -212,14 +216,15 @@ def init_vector_db():
                 processed_files_count += 1
 
     if extracted_text.strip():
+        FULL_DOCUMENT_TEXT = extracted_text
         print(f"💡 Indexing {processed_files_count} document(s) with OpenAI Embeddings...")
         
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=2000,
-            chunk_overlap=200,
-            separators=["\n\n", "\n", "။"]
+            chunk_size=1500,
+            chunk_overlap=250,
+            separators=["\n\n", "\n", "။", "၊", " "]
         )
-        chunks = text_splitter.split_text(extracted_text)
+        DOCUMENT_CHUNKS = text_splitter.split_text(extracted_text)
         
         chroma_client = chromadb.PersistentClient(path="./nspu_vector_db")
         try:
@@ -228,15 +233,15 @@ def init_vector_db():
             pass
             
         collection = chroma_client.create_collection(name="nspu_docs")
-        embeddings = get_text_embeddings_batch(chunks)
-        ids = [f"doc_{i}" for i in range(len(chunks))]
+        embeddings = get_text_embeddings_batch(DOCUMENT_CHUNKS)
+        ids = [f"doc_{i}" for i in range(len(DOCUMENT_CHUNKS))]
         
         collection.add(
-            documents=chunks,
+            documents=DOCUMENT_CHUNKS,
             embeddings=embeddings,
             ids=ids
         )
-        print(f"✅ Vector DB Created Successfully! (Total Chunks Indexed: {len(chunks)})")
+        print(f"✅ Vector DB Created Successfully! (Total Chunks Indexed: {len(DOCUMENT_CHUNKS)})")
     else:
         print("⚠️ Warning: No valid .docx or .pdf documents found.")
 
@@ -319,48 +324,80 @@ async def create_comment(data: CommentInput):
     finally:
         connection.close()
 
+
 @app.get("/api/ask")
-async def ask_chatbot(question: str = Query(..., description="ကျောင်းအကြောင်းမေးခွန်းများ")):
-    if not os.path.exists("./nspu_vector_db"):
-        raise HTTPException(status_code=400, detail="Knowledge base is not initialized.")
+async def ask_chatbot(question: str = Query(..., description="User Question")):
+    clean_q = question.strip()
+    if not clean_q:
+        return {"answer": "မင်္ဂလာပါခင်ဗျာ၊ သိရှိလိုသည်များကို မေးမြန်းနိုင်ပါသည်။"}
+    
+    if not DOCUMENT_CHUNKS or not FULL_DOCUMENT_TEXT:
+        raise HTTPException(status_code=400, detail="Knowledge base not ready.")
+
     try:
+        # Step 1: AI Query Expansion (Generates semantic variations & key concepts)
+        expand_prompt = f"""
+        User Query: "{clean_q}"
+        Task: Identify the core topic and generate 3 to 5 related Myanmar synonyms, English terms, and topic keywords.
+        Example: "ကျင်းပသောပွဲအခမ်းအနားများ" -> ["ပွဲ", "အခမ်းအနား", "Fresher", "Festival", "Dinner", "လှုပ်ရှားမှု"]
+        Return strictly a JSON list of strings: {{"keywords": ["term1", "term2", ...]}}
+        """
+        try:
+            exp_resp = openai_client.chat.completions.create(
+                messages=[{"role": "user", "content": expand_prompt}],
+                model="gpt-4o-mini",
+                response_format={"type": "json_object"}
+            )
+            parsed = json.loads(exp_resp.choices[0].message.content)
+            search_terms = parsed.get("keywords", [clean_q])
+        except Exception:
+            search_terms = [clean_q]
+
+        # Ensure original query is always included
+        search_terms.append(clean_q)
+
+        # Step 2: Semantic Vector Search
         chroma_client = chromadb.PersistentClient(path="./nspu_vector_db")
         collection = chroma_client.get_collection(name="nspu_docs")
+        q_embedding = get_text_embedding(clean_q)
         
-        clean_q = question.strip()
-        query_embedding = get_text_embedding(clean_q)
-        
-        # 1. Vector Similarity Search
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=8
+        vec_results = collection.query(
+            query_embeddings=[q_embedding],
+            n_results=6
         )
-        retrieved_docs = results["documents"][0] if results.get("documents") else []
-        
-        # 2. Comprehensive Root Keyword Matching
-        all_data = collection.get()
-        all_docs = all_data.get("documents", [])
-        
-        keywords = [
-            "ပွဲ", "အခမ်းအနား", "Fresher", "Science Festival", "Dinner",
-            "စည်းကမ်း", "အပြစ်", "သတိပေး", "ထုတ်ပယ်", "အဆောင်", "ကတိ",
-            "ဝင်ခွင့်", "အရည်အချင်း", "ရမှတ်", "ဘွဲ့", "အထူးပြု", "သင်တန်း",
-            "အင်ဂျင်နီယာ", "ဗိသုကာ", "ကွန်ပျူတာ", "Recreation", "Gym"
-        ]
-        
-        matched_keyword_docs = []
-        for kw in keywords:
-            if kw in clean_q:
-                matched_keyword_docs.extend([d for d in all_docs if kw in d])
-                
-        combined_docs = list(dict.fromkeys(matched_keyword_docs + retrieved_docs))[:8]
-        context = "\n\n---\n\n".join(combined_docs)
-      
-        system_prompt = """You are the official guide assistant for Naypyitaw State Polytechnic University (NSPU).
-Answer the user's question accurately, politely, and completely based ONLY on the provided Context.
-When the question asks for lists, rules (စည်းကမ်း/အပြစ်များ), events, or degrees, list ALL bullet points found in the Context completely without omitting any items."""
+        matched_chunks = vec_results["documents"][0] if vec_results.get("documents") else []
 
-        user_content = f"Context:\n{context}\n\nQuestion: {clean_q}"
+        # Step 3: Fuzzy Substring Search across all chunks using expanded terms
+        keyword_chunks = []
+        for chunk in DOCUMENT_CHUNKS:
+            for term in search_terms:
+                if isinstance(term, str) and len(term.strip()) >= 2 and term.strip().lower() in chunk.lower():
+                    keyword_chunks.append(chunk)
+                    break
+
+        # Step 4: Combine & Deduplicate Contexts
+        all_matched = []
+        for c in (keyword_chunks + matched_chunks):
+            if c not in all_matched:
+                all_matched.append(c)
+
+        # Fallback: If matches are extremely low, provide the most relevant top sections
+        if len(all_matched) < 2:
+            all_matched = DOCUMENT_CHUNKS[:4]
+
+        context = "\n\n---\n\n".join(all_matched[:8])
+
+        # Step 5: Flexible System Prompt for Comprehensive Answering
+        system_prompt = """You are the knowledgeable and polite student guide assistant for Naypyitaw State Polytechnic University (NSPU).
+Use the provided Context to answer the user's question completely in Myanmar Unicode (Padauk style).
+
+Guidelines:
+1. If the user asks about events, rules, faculties, admission criteria, canteen, or facilities, extract and summarize ALL relevant points found in the Context. Use bullet points for readability.
+2. Synthesize context intelligently. For example, if they ask for "ပွဲအခမ်းအနားများ", list "Fresher Welcome", "Science Festival", etc. even if the exact phrase "ပွဲအခမ်းအနားများ" isn't explicitly written next to those events.
+3. Be helpful and clear. 
+4. Only if the Context completely lacks any related information on the topic, politely inform the user that the guide does not contain that specific detail."""
+
+        user_content = f"Context Information from University Documents:\n{context}\n\nUser Question: {clean_q}"
 
         response = openai_client.chat.completions.create(
             messages=[
@@ -368,13 +405,13 @@ When the question asks for lists, rules (စည်းကမ်း/အပြစ�
                 {"role": "user", "content": user_content}
             ],
             model="gpt-4o-mini",
-            temperature=0.0
+            temperature=0.1
         )
-        
+
         return {"answer": response.choices[0].message.content}
 
     except Exception as e:
-        print(f"Error in /api/ask: {e}")
+        print(f"Error answering question: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/admin/comments")
